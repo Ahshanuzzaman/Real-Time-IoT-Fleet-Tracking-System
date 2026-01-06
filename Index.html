@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bangladesh National Fleet Monitor</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; display: flex; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0d1117; color: #c9d1d9; }
+        
+        /* Sidebar Styles */
+        #dashboard {
+            width: 400px;
+            height: 100vh;
+            background: #161b22;
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid #30363d;
+            z-index: 1001;
+        }
+
+        .header { padding: 20px; background: #0d1117; border-bottom: 1px solid #30363d; }
+        .header h2 { margin: 0; font-size: 1.2rem; color: #58a6ff; }
+        
+        #status-indicator { font-size: 0.8rem; margin-top: 10px; display: flex; align-items: center; }
+        .dot { height: 10px; width: 10px; border-radius: 50%; display: inline-block; margin-right: 8px; }
+        .online { background-color: #238636; box-shadow: 0 0 8px #238636; }
+        .offline { background-color: #da3633; }
+
+        #busSearch {
+            width: 90%; padding: 10px; margin-top: 15px; border-radius: 6px;
+            border: 1px solid #30363d; background: #0d1117; color: white; outline: none;
+        }
+
+        /* Table Area */
+        .table-wrap { flex-grow: 1; overflow-y: auto; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+        th { background: #21262d; padding: 12px; text-align: left; position: sticky; top: 0; color: #8b949e; }
+        td { padding: 12px; border-bottom: 1px solid #30363d; }
+
+        /* Speed and ETA colors */
+        .speed-val { color: #d29922; font-weight: bold; }
+        .eta-val { color: #58a6ff; font-weight: bold; }
+
+        /* Map Area */
+        #map { flex-grow: 1; height: 100vh; background: #e5e3df; }
+
+        /* Arrival Effect */
+        .arrived-row { background-color: #1b4332 !important; transition: background 0.5s; }
+    </style>
+</head>
+<body>
+
+    <div id="dashboard">
+        <div class="header">
+            <h2>National Fleet Live</h2>
+            <div id="status-indicator">
+                <span id="status-dot" class="dot offline"></span>
+                <span id="status-text">Connecting to Bridge...</span>
+            </div>
+            <input type="text" id="busSearch" placeholder="Search Bus or City...">
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Bus & Destination</th>
+                        <th>Speed</th>
+                        <th>ETA</th>
+                    </tr>
+                </thead>
+                <tbody id="bus-table-body"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // 1. Initialize Map with Traditional OpenStreetMap View
+        var map = L.map('map').setView([23.8103, 90.4125], 7);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        // 2. Data Storage
+        var buses = {}; 
+
+        // 3. Color Configs
+        function getBusConfig(id) {
+            const routes = {
+                'BUS-COX': { color: "#FF0000" },
+                'BUS-SYL': { color: "#2ECC71" },
+                'BUS-RAJ': { color: "#F1C40F" },
+                'BUS-BAR': { color: "#8E44AD" },
+                'BUS-DIN': { color: "#E67E22" },
+                'BUS-KHU': { color: "#0000FF" }
+            };
+            return routes[id] || { color: "#000000" };
+        }
+
+        // 4. WebSocket Connection
+        function startConnection() {
+            var socket = new WebSocket("ws://localhost:8765");
+            
+            socket.onopen = function() {
+                document.getElementById('status-dot').className = "dot online";
+                document.getElementById('status-text').innerText = "System Live";
+            };
+
+            socket.onmessage = function(event) {
+                var data = JSON.parse(event.data);
+                var id = data.bus_id;
+
+                // Handle Arrival
+                if (data.status === "Arrived") {
+                    if (buses[id]) {
+                        buses[id].marker.bindPopup(`<b>✅ ${id} ARRIVED</b><br>at ${data.destination}`).openPopup();
+                        document.getElementById(`row-${id}`).classList.add('arrived-row');
+                        document.getElementById(`speed-${id}`).innerText = "0 km/h";
+                        document.getElementById(`eta-${id}`).innerText = "Reached";
+                    }
+                    return;
+                }
+
+                var lat = parseFloat(data.lat);
+                var lon = parseFloat(data.lon);
+                var pos = [lat, lon];
+
+                // Logic for New Bus entry
+                if (!buses[id]) {
+                    var config = getBusConfig(id);
+                    // Create marker with popup showing speed/eta
+                    var marker = L.marker(pos).addTo(map);
+                    var path = L.polyline([], {color: config.color, weight: 4, opacity: 0.7}).addTo(map);
+                    
+                    var tableBody = document.getElementById('bus-table-body');
+                    var row = tableBody.insertRow();
+                    row.id = "row-" + id;
+                    row.innerHTML = `
+                        <td><b style="color:${config.color}">${id}</b><br><small>${data.destination}</small></td>
+                        <td class="speed-val" id="speed-${id}">${data.speed || '---'}</td>
+                        <td class="eta-val" id="eta-${id}">${data.eta || '---'}</td>
+                    `;
+                    buses[id] = { marker: marker, path: path };
+                }
+
+                // Logic for Real-time Movement
+                buses[id].marker.setLatLng(pos);
+                buses[id].marker.bindPopup(`<b>${id}</b><br>To: ${data.destination}<br>Speed: ${data.speed}<br>ETA: ${data.eta}`);
+                buses[id].path.addLatLng(pos);
+                
+                // Update Sidebar values
+                document.getElementById(`speed-${id}`).innerText = data.speed;
+                document.getElementById(`eta-${id}`).innerText = data.eta;
+            };
+
+            socket.onclose = function() {
+                document.getElementById('status-dot').className = "dot offline";
+                document.getElementById('status-text').innerText = "Disconnected. Retrying...";
+                setTimeout(startConnection, 3000);
+            };
+        }
+
+        // 5. Search Filter
+        document.getElementById('busSearch').addEventListener('keyup', function() {
+            var filter = this.value.toLowerCase();
+            var rows = document.getElementById('bus-table-body').getElementsByTagName('tr');
+            for (var i = 0; i < rows.length; i++) {
+                rows[i].style.display = rows[i].textContent.toLowerCase().includes(filter) ? "" : "none";
+            }
+        });
+
+        startConnection();
+    </script>
+</body>
+</html>
